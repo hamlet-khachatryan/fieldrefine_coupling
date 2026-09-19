@@ -1,0 +1,74 @@
+# FieldRefine configuration.
+#
+# Run from the repository root; the package lives in src/, while core.py and device.py
+# stay flat where SPEC.md requires them:
+#   PYTHONPATH=src python -m fieldrefine.cli pdb_id=5R82 zero_field=true stage=nullgate
+#   PYTHONPATH=src python -m fieldrefine.cli stage=refine grid.indices=[0,1,2] grid.max_steps=500
+#
+# Any key below is an override of the form key=value, dotted for nested groups.
+#
+# Input formats, all resolved from the PDB entry and cached under data/<pdbid>/:
+#   <ID>.cif       mmCIF coordinates            <ID>-sf.cif  mmCIF structure factors
+#   <ID>.mtz       reflections, via gemmi       required: F/SIGF and a free-flag column
+# Intensity-only and unmerged depositions are rejected, as are entries with no
+# deposited test set. Free flags are never generated: a fresh test set has already
+# been seen by the deposited model.
+#
+# Output formats:
+#   ctx[_zero].npz   Ctx arrays        meta[_zero].json     grid, symmetry, scales
+#   nullgate[_zero].json  the three null numbers and their thresholds
+#   grid[_zero]/point_NNNN.{npz,json}  per-point state, trace and knobs
+#   maps[_zero]/point_NNNN/*.ccp4 + coefficients.mtz   maps for Coot
+#   evaluate[_zero].csv + .shells.json                 metrics, one row per point
+#
+# Worth knowing: the null gate raises and stops the pipeline if any of its three
+# thresholds is missed, and refine refuses to start until it has passed. R_free is
+# logged for the trace only; it is not an objective and must not be used to choose a
+# stopping point, by optimiser or by eye.
+
+pdb_id: 6LU7            # PDB entry; must have deposited structure factors and free flags
+root: data              # cache root: data/<pdbid>/
+zero_field: false       # true: rho0 is exactly zero -- no model, no bulk solvent, no scale
+                        # fit; only cell, symmetry, amplitudes, sigmas and flags are used.
+                        # Caches are separate (*_zero), so it never overwrites a model run.
+                        # The start state is seeded from gate.seed with its free components
+                        # projected out, because at rho0 = 0 every |F| would be zero.
+sample_rate: 3.0        # grid points per d_min. Sets both accuracy against gemmi's direct
+                        # summation and the memory footprint; table in docs/02_prepare.md.
+                        # Changing it rebuilds the cached Ctx rather than reusing it.
+stage: all              # fetch | prepare | nullgate | refine | maps | evaluate | all.
+                        # Stages are resumable: each reads the previous stage's cache.
+
+gate:
+  n_steps: 100          # steps taken before the three null numbers are measured
+  q_sigma: 2.0          # index radius used to build the c = 0 sigma spectrum
+  seed: 0               # seeds the zero-field start state; unused when a model is present
+
+grid:
+  indices: null         # null runs all 100 points; a list runs those. slurm/run.sbatch
+                        # passes SLURM_ARRAY_TASK_ID here, so --array=0-99 works unchanged
+  lr: null              # null estimates 0.5 / lambda_max by power iteration on J alone.
+                        # Set a float to put every point on the same step size
+  max_steps: 2000       # a cap, not a criterion; the stopping rule is the noise floor
+  chunk: 100            # steps per scan between stopping-rule checks; bounds the trace
+                        # held on the device, and costs nothing inside the compiled loop
+  seed: 0               # PRNG key for the zero-field start state
+
+maps:
+  index: null           # null writes maps for the null grid point (c = 0, mu = 0)
+  write_mtz: true       # one MTZ carrying every coefficient set, for Coot
+
+wandb:
+  mode: disabled        # online | offline | disabled
+  project: fieldrefine
+  entity: null
+  group: null           # defaults to pdb_id
+  job_type: grid
+
+hydra:
+  run:
+    dir: outputs/${pdb_id}/${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: outputs/${pdb_id}/multirun/${now:%Y-%m-%d_%H-%M-%S}
+  job:
+    chdir: false        # keep relative paths (data/, conf/) meaningful

@@ -1,0 +1,21 @@
+[project]
+name = "fieldrefine-coupling"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["numpy", "gemmi", "pandas", "wandb", "hydra-core"]
+
+[project.optional-dependencies]
+cpu = ["jax==0.10.2"]
+cuda12 = ["jax[cuda12]==0.10.2"]
+cuda13 = ["jax[cuda13]==0.10.2"]
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+# src/ holds the fieldrefine package; "." holds core.py and device.py, which
+# SPEC.md keeps flat and unpackaged.
+pythonpath = ["src", "."]
+
+[tool.uv]
+conflicts = [[{ extra = "cpu" }, { extra = "cuda12" }, { extra = "cuda13" }]]

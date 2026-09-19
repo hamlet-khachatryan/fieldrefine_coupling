@@ -116,31 +116,44 @@ def _index_radius(shape):
     return np.sqrt(q0[:, None, None] ** 2 + q1[None, :, None] ** 2 + q2[None, None, :] ** 2)
 
 
-def _twofold_sym(shape, t0=1):
+def _fold(j0, j1, j2, shape):
+    n0, n1, n2 = shape
     H = _h(shape)
-    h0 = np.arange(H[0])[:, None, None]
-    h1 = np.arange(H[1])[None, :, None]
-    h2 = np.arange(H[2])[None, None, :]
-    # x(-r0+t0,-r1,r2) -> F(-h0,-h1,h2) exp(-2pi*i*h0*t0/n0)
-    src = np.broadcast_to(((-h0) % H[0]) * H[1] * H[2] + ((-h1) % H[1]) * H[2] + h2, H)
-    ident = np.arange(np.prod(H)).reshape(H)
-    phase = np.broadcast_to(np.exp(-2j * np.pi * h0 * t0 / shape[0]), H)
-    sym_idx = np.stack([ident, src]).astype(np.int32)
-    sym_phase = np.stack([np.ones(H, dtype=np.complex128), phase]).astype(np.complex128)
-    return jnp.asarray(sym_idx), jnp.asarray(sym_phase)
+    j2m = np.mod(j2, n2)
+    need = j2m > n2 // 2
+    i0 = np.where(need, np.mod(-j0, n0), np.mod(j0, n0))
+    i1 = np.where(need, np.mod(-j1, n1), np.mod(j1, n1))
+    i2 = np.where(need, n2 - j2m, j2m)
+    return ((i0 * H[1] + i1) * H[2] + i2).astype(np.int32), need
 
 
-def _apply_op(G, sym_idx, sym_phase, k):
-    return G.ravel()[sym_idx[k]] * sym_phase[k]
+def _twofold_sym(shape):
+    H = _h(shape)
+    h0 = np.broadcast_to(np.arange(H[0])[:, None, None], H)
+    h1 = np.broadcast_to(np.arange(H[1])[None, :, None], H)
+    h2 = np.broadcast_to(np.arange(H[2])[None, None, :], H)
+    # g: x -> (x0+1/2, -x1, -x2); M h = (h0,-h1,-h2)
+    src, conj = _fold(h0, -h1, -h2, shape)
+    ident = np.arange(int(np.prod(H)), dtype=np.int32).reshape(H)
+    phase = np.where(h0 % 2 == 0, 1.0, -1.0).astype(np.complex128)
+    sym_idx = jnp.asarray(np.stack([ident, src]).astype(np.int32))
+    sym_phase = jnp.asarray(np.stack([np.ones(H, dtype=np.complex128), phase]))
+    sym_conj = jnp.asarray(np.stack([np.zeros(H, dtype=bool), conj]))
+    return sym_idx, sym_phase, sym_conj
+
+
+def _apply_op(G, sym_idx, sym_phase, sym_conj, k):
+    g = G.ravel()[sym_idx[k]]
+    return jnp.where(sym_conj[k], jnp.conj(g), g) * sym_phase[k]
 
 
 def _sym_ctx(seed, shape=SHAPE):
     ctx = core.make_ctx(_key(seed), shape)
-    sym_idx, sym_phase = _twofold_sym(shape)
+    sym_idx, sym_phase, sym_conj = _twofold_sym(shape)
     work = ctx.mask_work & ctx.mask_work.ravel()[sym_idx[1]]
     free = ctx.mask_free & ctx.mask_free.ravel()[sym_idx[1]]
     return ctx._replace(
-        sym_idx=sym_idx, sym_phase=sym_phase,
+        sym_idx=sym_idx, sym_phase=sym_phase, sym_conj=sym_conj,
         mask_work=work, mask_free=free, mask_obs=work | free,
     )
 
@@ -158,8 +171,10 @@ def _full_ctx(seed, state, c=0.5, mu=1.0):
 
 def _null_ctx(seed, shape=SHAPE, c=0.0, mu=0.0):
     ctx = core.make_ctx(_key(seed), shape)
-    sym_idx, sym_phase = core.identity_sym(_h(shape))
-    ctx = ctx._replace(sym_idx=sym_idx, sym_phase=sym_phase, mu=_f64(mu))
+    sym_idx, sym_phase, sym_conj = core.identity_sym(_h(shape))
+    ctx = ctx._replace(
+        sym_idx=sym_idx, sym_phase=sym_phase, sym_conj=sym_conj, mu=_f64(mu)
+    )
     return ctx._replace(sqrtS_sigma=core.sigma_spectrum(c, Q_SIGMA, ctx))
 
 
@@ -388,23 +403,30 @@ def test_12_project_band_self_adjoint():
 
 
 def test_13_project_sym_idempotent():
-    sym_idx, sym_phase = _twofold_sym(SHAPE)
-    F = _cnormal(13, _h(SHAPE))
-    TT = _apply_op(_apply_op(F, sym_idx, sym_phase, 1), sym_idx, sym_phase, 1)
+    sym_idx, sym_phase, sym_conj = _twofold_sym(SHAPE)
+    assert bool(jnp.any(sym_conj)), "fixture: the operator must fold across the rfft axis"
+    F = core.r2c(_normal(13, SHAPE))
+    TT = _apply_op(_apply_op(F, sym_idx, sym_phase, sym_conj, 1), sym_idx, sym_phase, sym_conj, 1)
     assert _rel(TT, F) <= TOL, "fixture: the two-operator set must close into a group"
-    P = core.project_sym(F, sym_idx, sym_phase)
+    P = core.project_sym(F, sym_idx, sym_phase, sym_conj)
     assert _rel(P, F) > 0.1, "fixture: projection must be non-trivial"
-    assert _rel(core.project_sym(P, sym_idx, sym_phase), P) <= TOL
+    assert _rel(core.project_sym(P, sym_idx, sym_phase, sym_conj), P) <= TOL
+    assert _rel(core.r2c(core.c2r(P, SHAPE)), P) <= TOL, (
+        "project_sym must map Hermitian-consistent spectra to Hermitian-consistent spectra"
+    )
 
 
 def test_14_project_sym_self_adjoint():
-    sym_idx, sym_phase = _twofold_sym(SHAPE)
+    sym_idx, sym_phase, sym_conj = _twofold_sym(SHAPE)
     mult = jnp.asarray(_mult_ref(SHAPE))
-    F = _cnormal(14, _h(SHAPE))
-    G = _cnormal(140, _h(SHAPE))
-    lhs = _ip_mult(core.project_sym(F, sym_idx, sym_phase), G, mult)
-    rhs = _ip_mult(F, core.project_sym(G, sym_idx, sym_phase), mult)
-    assert abs(lhs - rhs) <= TOL * max(abs(lhs), abs(rhs))
+    F = core.r2c(_normal(14, SHAPE))
+    G = core.r2c(_normal(140, SHAPE))
+    lhs = _ip_mult(core.project_sym(F, sym_idx, sym_phase, sym_conj), G, mult)
+    rhs = _ip_mult(F, core.project_sym(G, sym_idx, sym_phase, sym_conj), mult)
+    assert abs(lhs - rhs) <= TOL * max(abs(lhs), abs(rhs)), (
+        "self-adjointness is asserted under the multiplicity-weighted inner product of SPEC 3, "
+        "not the plain one; with sym_conj the adjoint of an operator is the inverse element"
+    )
 
 
 def test_15_pi_real_idempotent():
@@ -741,18 +763,22 @@ def test_38_delta_r_free_vanishes_monotonically_as_c_decreases():
 
 def test_39_identity_sym_projection_is_identity():
     H = _h(SHAPE)
-    sym_idx, sym_phase = core.identity_sym(H)
+    sym_idx, sym_phase, sym_conj = core.identity_sym(H)
     assert sym_idx.shape == (1,) + H and sym_idx.dtype == jnp.int32
     assert sym_phase.shape == (1,) + H and sym_phase.dtype == jnp.complex128
+    assert sym_conj.shape == (1,) + H and sym_conj.dtype == jnp.bool_
+    assert not bool(jnp.any(sym_conj)), "identity_sym must return an all-False sym_conj"
     F = _cnormal(39, H)
-    assert np.array_equal(np.asarray(core.project_sym(F, sym_idx, sym_phase)), np.asarray(F))
+    assert np.array_equal(
+        np.asarray(core.project_sym(F, sym_idx, sym_phase, sym_conj)), np.asarray(F)
+    )
 
 
 def test_40_project_sym_output_invariant_under_each_operator():
-    sym_idx, sym_phase = _twofold_sym(SHAPE)
-    P = core.project_sym(_cnormal(40, _h(SHAPE)), sym_idx, sym_phase)
+    sym_idx, sym_phase, sym_conj = _twofold_sym(SHAPE)
+    P = core.project_sym(core.r2c(_normal(40, SHAPE)), sym_idx, sym_phase, sym_conj)
     for k in range(2):
-        assert _rel(_apply_op(P, sym_idx, sym_phase, k), P) <= TOL, k
+        assert _rel(_apply_op(P, sym_idx, sym_phase, sym_conj, k), P) <= TOL, k
 
 
 def test_41_delta_rho_spectrum_is_symmetric():
@@ -760,7 +786,7 @@ def test_41_delta_rho_spectrum_is_symmetric():
     ctx = _full_ctx(41, state)
     assert ctx.sym_idx.shape[0] == 2
     D = core.r2c(core.delta_rho(state, ctx))
-    assert _rel(core.project_sym(D, ctx.sym_idx, ctx.sym_phase), D) <= TOL
+    assert _rel(core.project_sym(D, ctx.sym_idx, ctx.sym_phase, ctx.sym_conj), D) <= TOL
 
 
 def test_42_fit_scale_recovers_k_exactly():

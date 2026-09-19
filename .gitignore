@@ -1,6 +1,10 @@
 # IDE - JetBrains
 .idea/
 .claude/
+.docs/
+.outputs/
+.data/
+
 *.iml
 *.iws
 *.ipr
