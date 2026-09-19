@@ -25,6 +25,19 @@ GTrace = NamedTuple("GTrace", [
     ("r_work", jax.Array), ("r_free", jax.Array), ("gnorm", jax.Array),
     ("t_star", jax.Array), ("at_floor", jax.Array),
 ])
+Knobs = NamedTuple("Knobs", [
+    ("kernel", str), ("m", int), ("patch", int), ("mu_scale", float),
+])
+# S10: kernel, approximation, patch size, and mu over four decades. mu_scale is a
+# multiple of the balance unit, never an absolute weight -- the unit is cell-dependent.
+GRID = (
+    ("gaussian", "rq", "inner"),
+    (64, 128, 256),
+    (3, 5, 7),
+    (0.0, 1e-4, 1e-3, 1e-2, 1e-1, 1.0),
+)
+S_FLOOR = 1e-2
+
 Memory = NamedTuple("Memory", [
     ("n", int), ("d", int), ("m", int), ("chunk", int), ("peak_bytes", int),
 ])
@@ -332,3 +345,21 @@ def hypergrad_implicit(params, ctx, eps_floor, max_iter, n_cg=60):
                                                           ctx._replace(phi=gmrf.embed_cnn(p, ctx.rho0))))
 
     return jax.tree_util.tree_map(lambda a: -a, jax.grad(coupling)(params))
+
+
+def knob_grid(index, spec):
+    """Map a flat index to one point of the S10 grid.
+
+    C order, so the kernel is the slowest axis and mu the fastest. Pure and total: a
+    SLURM array index addresses a configuration directly, and an out-of-range index
+    raises rather than wrapping. This is a map, not a controller -- nothing here chooses
+    a configuration, and nothing may choose one from the R_free trace.
+    """
+    kernels, ms, patches, mus = spec
+    total = len(kernels) * len(ms) * len(patches) * len(mus)
+    if not 0 <= index < total:
+        raise IndexError(f"knob index {index} outside grid of {total}")
+    i, rest = divmod(index, len(ms) * len(patches) * len(mus))
+    j, rest = divmod(rest, len(patches) * len(mus))
+    k, l = divmod(rest, len(mus))
+    return Knobs(kernels[i], ms[j], patches[k], mus[l])
