@@ -1,6 +1,8 @@
 #!/bin/bash
 #SBATCH --gres=gpu:1
-#SBATCH --constraint=<gpu class>
+# SLURM splits an unfilled placeholder on the space and rejects the script, so this
+# ships commented out; pass -C on the command line or set your class here
+##SBATCH --constraint=a100
 #SBATCH --cpus-per-task=8
 #SBATCH --output=%x-%A_%a.out
 set -euo pipefail
@@ -21,4 +23,13 @@ export JAX_PLATFORMS=cuda
 export JAX_ENABLE_X64=1
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 export XLA_FLAGS=--xla_gpu_deterministic_ops=true
+
+# a quota-aborted uv sync leaves bin/python in place but the wheels half-extracted,
+# so check the backend actually loads rather than that the venv exists
+python -c 'import device; device.require_accelerator("gpu")' || {
+    echo "node $(hostname): ${VENV} did not give a GPU backend (driver ${DRIVER}, CUDA ${CUDA_MAJOR})" >&2
+    echo "rebuild it, and check quota: uv cache prune; du -sh ${VENV}" >&2
+    exit 1
+}
+
 exec python -m "$@"

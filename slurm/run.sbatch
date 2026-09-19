@@ -1,7 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=fieldrefine
 #SBATCH --gres=gpu:1
-#SBATCH --constraint=<gpu class>
+# an unfilled placeholder makes SLURM reject the script; pass -C on the command line
+##SBATCH --constraint=a100
 #SBATCH --cpus-per-task=8
 #SBATCH --output=%x-%A_%a.out
 set -euo pipefail
