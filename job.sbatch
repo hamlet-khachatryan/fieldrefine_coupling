@@ -26,6 +26,9 @@ if [ ! -x "${VENV}/bin/python" ]; then
     exit 1
 fi
 source "${VENV}/bin/activate"
+# pytest reads pythonpath from pyproject.toml, but a bare "python -m" does not;
+# the package lives in src/ while core.py and device.py stay flat at the root
+export PYTHONPATH="src:${PYTHONPATH:-}"
 export JAX_PLATFORMS=cuda
 export JAX_ENABLE_X64=1
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
