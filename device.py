@@ -40,7 +40,9 @@ def cuda_major(driver, table):
             matches.
     """
     head = driver.strip().split(".")[0]
-    if not (head.isascii() and head.isdigit()):
+    # isdigit() alone accepts non-ASCII numerals, but str.isascii() is 3.7+ and
+    # job.sbatch may reach this under an older system python3, before any venv exists
+    if not head or any(c not in "0123456789" for c in head):
         raise ValueError(f"unparseable NVIDIA driver version: {driver!r}")
     major = int(head)
     for min_driver_major, cuda in table:

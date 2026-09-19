@@ -11,7 +11,14 @@ set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$PWD}"
 
 DRIVER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1)
-CUDA_MAJOR=$(python3 -c 'import sys, device; print(device.cuda_major(sys.argv[1], ((580, 13), (525, 12))))' "$DRIVER")
+
+# the system python3 on a compute node can be older than device.py expects; prefer any
+# venv interpreter, which is pinned to 3.11, and fall back only if none is built yet
+PROBE_PY=python3
+for CANDIDATE in .venv/bin/python .venv-cu13/bin/python .venv-cu12/bin/python; do
+    if [ -x "$CANDIDATE" ]; then PROBE_PY="$CANDIDATE"; break; fi
+done
+CUDA_MAJOR=$("$PROBE_PY" -c 'import sys, device; print(device.cuda_major(sys.argv[1], ((580, 13), (525, 12))))' "$DRIVER")
 VENV=".venv-cu${CUDA_MAJOR}"
 if [ ! -x "${VENV}/bin/python" ]; then
     echo "driver ${DRIVER} maps to CUDA ${CUDA_MAJOR}, but ${VENV} is not built here" >&2
